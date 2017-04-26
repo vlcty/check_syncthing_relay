@@ -1,0 +1,122 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+use LWP::UserAgent;
+use JSON;
+
+my $ARG_ADDRESS = '';
+my $ARG_PORT = 22070;
+
+sub exitCritical {
+    printf("CRITICAL - %s\n", shift);
+    exit(2);
+}
+
+sub exitUnknown {
+    printf("UNKNOWN - %s\n", shift);
+    exit(3);
+}
+
+sub parseArguments {
+    GetOptions (
+        'address=s' => \$ARG_ADDRESS,
+        'port=i' => \$ARG_PORT
+    );
+
+    if ( length($ARG_ADDRESS) == 0 ) {
+        exitUnknown('Address can\'t be empty');
+    }
+
+    if ( $ARG_PORT !~ /^\d+$/ ) {
+        exitUnknown('Port must be a number');
+    }
+
+    if ( $ARG_PORT < 1 || $ARG_PORT > 65535 ) {
+        exitUnknown('Port must be between 1 and 65535');
+    }
+}
+
+sub fetchStatusPage {
+    my $userAgent = LWP::UserAgent->new(
+        timeout => 5,
+        agent => 'check_syncthing_relay'
+    );
+
+    my $response = $userAgent->get(sprintf('http://%s:%d/status',
+        $ARG_ADDRESS, $ARG_PORT));
+
+    if ( $response->is_success() ) {
+        my $json = decode_json($response->decoded_content());
+
+        return $json;
+    }
+    else {
+        exitCritical('Was not able to contact status page');
+    }
+}
+
+sub extractFieldFromJson {
+    my $json = shift;
+    my $wantedField = shift;
+
+    if ( exists($json->{$wantedField}) ) {
+        return $json->{$wantedField};
+    }
+    else {
+        exitCritical('Field '. $wantedField .' not found in status page JSON');
+    }
+}
+
+sub scaleTraffic {
+    my $traffic = shift;
+    my $unit = shift;
+
+    my @units = undef;
+
+    if ( $unit eq 'Byte' ) {
+        @units = ('KByte', 'MByte', 'GByte', 'TByte', 'PByte');
+    }
+    else {
+        $traffic *= 1000; # Dirty hack, beacuse if Bit then the input is in KBit
+        @units = ('KBit', 'MBit', 'GBit', 'TBit');
+    }
+
+    while ( $traffic >= 1000 ) {
+        $traffic /= 1000;
+        $unit = shift(@units);
+    }
+
+    return sprintf('%.2f %s', $traffic, $unit);
+}
+
+sub main {
+    parseArguments();
+
+    my $json = fetchStatusPage();
+    my @bandwidth = @{ extractFieldFromJson($json,'kbps10s1m5m15m30m60m')};
+    my $connectionCounter = extractFieldFromJson($json,'numConnections');
+    my $activeSessionsCounter = extractFieldFromJson($json,'numActiveSessions');
+    my $transferredBytes = extractFieldFromJson($json, 'bytesProxied');
+
+    my $displayString = sprintf("Connections: %d Active sessions: %d Traffic: %s\nAverage bandwidth used:\n10s -> %s/s\n1m -> %s/s\n5m -> %s/s\n15m -> %s/s\n30m -> %s/s\n60m -> %s/s",
+        $connectionCounter,
+        $activeSessionsCounter,
+        scaleTraffic($transferredBytes, 'Byte'),
+        scaleTraffic($bandwidth[0], 'Bit'),
+        scaleTraffic($bandwidth[1], 'Bit'),
+        scaleTraffic($bandwidth[2], 'Bit'),
+        scaleTraffic($bandwidth[3], 'Bit'),
+        scaleTraffic($bandwidth[4], 'Bit'),
+        scaleTraffic($bandwidth[5], 'Bit'));
+
+    my $performanceString = sprintf('connections=%d active_sessions=%d traffic=%d avg_bandwidth_10s=%d avg_bandwidth_1m=%d avg_bandwidth_5m=%d avg_bandwidth_15m=%d avg_bandwidth_30m=%d avg_bandwidth_60m=%d',
+        $connectionCounter,
+        $activeSessionsCounter,
+        $transferredBytes,
+        $bandwidth[0], $bandwidth[1], $bandwidth[2], $bandwidth[3],
+        $bandwidth[4], $bandwidth[5]);
+
+    printf("OK - %s|%s\n", $displayString, $performanceString);
+}
+
+main();
